@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -32,6 +33,9 @@ func (o *RunOptions) defaults() {
 		o.ReconnectMax = 30 * time.Second
 	}
 }
+
+// sendFunc enqueues an envelope on the signaling WS. Safe for concurrent use.
+type sendFunc func(proto.Envelope) error
 
 // Run holds a WebSocket to the signaling service open, reconnecting with
 // exponential backoff. It returns only when ctx is cancelled.
@@ -76,7 +80,42 @@ func runSession(ctx context.Context, opt RunOptions) error {
 
 	slog.Info("connected to signaling", "server", opt.Config.ServerURL, "device_id", opt.Config.DeviceID)
 
-	// Reader goroutine.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Serialize writes on the WS through a single goroutine.
+	out := make(chan proto.Envelope, 32)
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case env := <-out:
+				if err := writeEnvelope(ctx, conn, env); err != nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	send := func(env proto.Envelope) error {
+		select {
+		case out <- env:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	// Track active sessions so incoming answers/candidates can reach the
+	// right PeerConnection.
+	sess := newSessionRegistry()
+	defer sess.closeAll("agent reconnecting")
+
+	// Reader.
 	readErr := make(chan error, 1)
 	go func() {
 		for {
@@ -90,33 +129,36 @@ func runSession(ctx context.Context, opt RunOptions) error {
 				continue
 			}
 			switch env.Type {
-			case proto.TypeHello:
-				slog.Debug("server hello")
-			case proto.TypePong:
+			case proto.TypeHello, proto.TypePong:
 				// healthy
+			case proto.TypeSessionRequest:
+				go startAgentSession(ctx, opt.Config, env, send, sess)
+			case proto.TypeSessionAnswer,
+				proto.TypeSessionCandidate,
+				proto.TypeSessionEnd:
+				sess.route(env)
 			default:
 				slog.Debug("unhandled message", "type", env.Type)
 			}
 		}
 	}()
 
-	// Writer / heartbeat loop.
+	// Heartbeat.
 	ticker := time.NewTicker(opt.HeartbeatInterval)
 	defer ticker.Stop()
-
-	// Fire one ping immediately so the first handshake confirms the token.
-	if err := writeEnvelope(ctx, conn, proto.Envelope{Type: proto.TypePing}); err != nil {
+	if err := send(proto.Envelope{Type: proto.TypePing}); err != nil {
 		return err
 	}
-
 	for {
 		select {
 		case <-ctx.Done():
+			<-writerDone
 			return ctx.Err()
 		case err := <-readErr:
+			<-writerDone
 			return err
 		case <-ticker.C:
-			if err := writeEnvelope(ctx, conn, proto.Envelope{Type: proto.TypePing}); err != nil {
+			if err := send(proto.Envelope{Type: proto.TypePing}); err != nil {
 				return err
 			}
 		}
@@ -147,4 +189,50 @@ func toWSURL(httpURL string) (string, error) {
 		return "", fmt.Errorf("unsupported server URL scheme %q", u.Scheme)
 	}
 	return strings.TrimRight(u.String(), "/"), nil
+}
+
+// --- session registry ------------------------------------------------------
+
+type sessionRegistry struct {
+	mu       sync.Mutex
+	sessions map[string]*agentSession
+}
+
+func newSessionRegistry() *sessionRegistry {
+	return &sessionRegistry{sessions: make(map[string]*agentSession)}
+}
+
+func (r *sessionRegistry) add(s *agentSession) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sessions[s.id] = s
+}
+
+func (r *sessionRegistry) remove(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.sessions, id)
+}
+
+func (r *sessionRegistry) route(env proto.Envelope) {
+	r.mu.Lock()
+	s, ok := r.sessions[env.SessionID]
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	s.dispatch(env)
+}
+
+func (r *sessionRegistry) closeAll(reason string) {
+	r.mu.Lock()
+	ss := make([]*agentSession, 0, len(r.sessions))
+	for _, s := range r.sessions {
+		ss = append(ss, s)
+	}
+	r.sessions = make(map[string]*agentSession)
+	r.mu.Unlock()
+	for _, s := range ss {
+		s.close(reason)
+	}
 }

@@ -38,13 +38,16 @@ type Server struct {
 	cfg      Config
 	store    *Store
 	presence *presence
+	sessions *sessionBroker
 }
 
 func NewServer(cfg Config, store *Store) *Server {
+	p := newPresence()
 	return &Server{
 		cfg:      cfg,
 		store:    store,
-		presence: newPresence(),
+		presence: p,
+		sessions: newSessionBroker(p),
 	}
 }
 
@@ -62,6 +65,8 @@ func (s *Server) Handler() http.Handler {
 
 	// WebSocket from agents.
 	mux.HandleFunc("/device", s.handleDeviceWS)
+	// WebSocket from the browser for an individual remote session.
+	mux.HandleFunc("/ws/session", s.handleSessionWS)
 
 	// Static browser bundle.
 	if webFS != nil {
@@ -69,6 +74,9 @@ func (s *Server) Handler() http.Handler {
 		// approval page there (preserving the user_code query string).
 		mux.HandleFunc("/enroll", func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFileFS(w, r, webFS, "enroll.html")
+		})
+		mux.HandleFunc("/session", func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFileFS(w, r, webFS, "session.html")
 		})
 		mux.Handle("/", http.FileServer(http.FS(webFS)))
 	}

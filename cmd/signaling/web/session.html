@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Shell — Connect</title>
+    <link rel="stylesheet" href="/style.css" />
+    <!-- xterm.js via CDN. TODO: vendor these into the bundle for offline / SRI -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+    <style>
+      html, body { height: 100%; }
+      body { display: flex; flex-direction: column; }
+      header { flex: 0 0 auto; }
+      main { flex: 1 1 auto; padding: 0; max-width: none; min-height: 0; display: flex; flex-direction: column; }
+      #status {
+        padding: 0.4rem 1rem; font-size: 0.85rem; color: var(--muted);
+        border-bottom: 1px solid var(--border); background: var(--panel);
+      }
+      #status.connected { color: var(--green); }
+      #status.error     { color: var(--red); }
+      #term-wrap {
+        flex: 1 1 auto; min-height: 0; padding: 0.5rem 1rem 1rem;
+        background: #0a0c0f;
+      }
+      #term { height: 100%; }
+      .xterm-viewport { background-color: transparent !important; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Shell</h1>
+      <nav><a href="/">&larr; Back</a></nav>
+    </header>
+    <main>
+      <div id="status">Connecting&hellip;</div>
+      <div id="term-wrap"><div id="term"></div></div>
+    </main>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+    <script src="/session.js"></script>
+  </body>
+</html>

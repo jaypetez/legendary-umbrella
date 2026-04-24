@@ -14,52 +14,74 @@ import (
 	"github.com/jaysonpetersen/legendary-umbrella/internal/proto"
 )
 
-// presence tracks which device IDs currently hold a live WebSocket.
-// M0 uses a single in-memory map; horizontal scaling is a later concern.
+// presence tracks which device IDs currently hold a live WebSocket and owns the
+// serialized writer for each connection. Session messages are routed via the
+// session broker; ping/pong and hello are handled inline here.
 type presence struct {
-	mu      sync.RWMutex
-	online  map[string]time.Time // deviceID -> last heartbeat
-	closers map[string]context.CancelFunc
+	mu    sync.RWMutex
+	conns map[string]*deviceConn // deviceID -> connection state
+}
+
+type deviceConn struct {
+	out    chan proto.Envelope
+	cancel context.CancelFunc
+	lastHB time.Time
 }
 
 func newPresence() *presence {
-	return &presence{
-		online:  make(map[string]time.Time),
-		closers: make(map[string]context.CancelFunc),
-	}
+	return &presence{conns: make(map[string]*deviceConn)}
 }
 
-func (p *presence) connect(deviceID string, cancel context.CancelFunc) {
+func (p *presence) register(deviceID string, dc *deviceConn) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if prev, ok := p.closers[deviceID]; ok {
-		prev() // kick the stale connection
+	if prev, ok := p.conns[deviceID]; ok {
+		prev.cancel() // kick the stale connection
 	}
-	p.closers[deviceID] = cancel
-	p.online[deviceID] = time.Now()
+	p.conns[deviceID] = dc
 }
 
-func (p *presence) disconnect(deviceID string) {
+func (p *presence) unregister(deviceID string, dc *deviceConn) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(p.closers, deviceID)
-	delete(p.online, deviceID)
+	if p.conns[deviceID] == dc {
+		delete(p.conns, deviceID)
+	}
 }
 
 func (p *presence) isOnline(deviceID string) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	_, ok := p.online[deviceID]
+	_, ok := p.conns[deviceID]
 	return ok
 }
 
 func (p *presence) heartbeat(deviceID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, ok := p.online[deviceID]; ok {
-		p.online[deviceID] = time.Now()
+	if c, ok := p.conns[deviceID]; ok {
+		c.lastHB = time.Now()
 	}
 }
+
+// Send pushes an envelope to the named device's outbound queue. Returns an
+// error if the device isn't connected or its queue is full.
+func (p *presence) Send(deviceID string, env proto.Envelope) error {
+	p.mu.RLock()
+	c, ok := p.conns[deviceID]
+	p.mu.RUnlock()
+	if !ok {
+		return ErrDeviceOffline
+	}
+	select {
+	case c.out <- env:
+		return nil
+	default:
+		return errors.New("device outbound queue full")
+	}
+}
+
+var ErrDeviceOffline = errors.New("device offline")
 
 // handleDeviceWS is the WebSocket endpoint the agent holds open.
 func (s *Server) handleDeviceWS(w http.ResponseWriter, r *http.Request) {
@@ -79,35 +101,54 @@ func (s *Server) handleDeviceWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true, // origin check is handled at the HTTP layer in single-tenant mode
+		InsecureSkipVerify: true, // single-tenant: origin policy handled upstream
 	})
 	if err != nil {
-		return // websocket.Accept already wrote a response
+		return
 	}
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	s.presence.connect(dev.ID, cancel)
-	defer s.presence.disconnect(dev.ID)
+	dc := &deviceConn{
+		out:    make(chan proto.Envelope, 32),
+		cancel: cancel,
+		lastHB: time.Now(),
+	}
+	s.presence.register(dev.ID, dc)
+	defer s.presence.unregister(dev.ID, dc)
 	_ = s.store.TouchDevice(ctx, dev.ID)
 
 	slog.Info("device connected", "device_id", dev.ID, "name", dev.Name, "remote", r.RemoteAddr)
 	defer slog.Info("device disconnected", "device_id", dev.ID)
 
-	// Send hello.
-	if err := wsWriteJSON(ctx, conn, proto.Envelope{
-		Type: proto.TypeHello,
-		Data: proto.HelloData{DeviceID: dev.ID, ServerT: time.Now().Unix()},
-	}); err != nil {
-		conn.Close(websocket.StatusInternalError, "hello failed")
-		return
-	}
+	// Writer goroutine: serialize all conn.Write calls.
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case env := <-dc.out:
+				if err := wsWriteJSON(ctx, conn, env); err != nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 
-	// Read loop. In M0 we only expect pings from the agent.
+	// Send hello on the writer.
+	dc.out <- mustEnvelope(proto.TypeHello, "", proto.HelloData{DeviceID: dev.ID, ServerT: time.Now().Unix()})
+
+	// Read loop.
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
 			conn.Close(websocket.StatusNormalClosure, "")
+			<-writerDone
+			// Mark any live sessions on this device as ended.
+			s.sessions.closeByDevice(dev.ID, "device disconnected")
 			return
 		}
 		var env proto.Envelope
@@ -118,7 +159,12 @@ func (s *Server) handleDeviceWS(w http.ResponseWriter, r *http.Request) {
 		case proto.TypePing:
 			s.presence.heartbeat(dev.ID)
 			_ = s.store.TouchDevice(ctx, dev.ID)
-			_ = wsWriteJSON(ctx, conn, proto.Envelope{Type: proto.TypePong})
+			dc.out <- proto.Envelope{Type: proto.TypePong}
+		case proto.TypeSessionOffer,
+			proto.TypeSessionAnswer,
+			proto.TypeSessionCandidate,
+			proto.TypeSessionEnd:
+			s.sessions.fromDevice(dev.ID, env)
 		}
 	}
 }
@@ -137,6 +183,19 @@ func bearerToken(r *http.Request) string {
 	if len(h) > len(p) && strings.EqualFold(h[:len(p)], p) {
 		return h[len(p):]
 	}
-	// Allow ?token= for WS clients that can't set headers easily (browsers).
 	return r.URL.Query().Get("token")
+}
+
+// mustEnvelope wraps a typed data payload into an Envelope, panicking if the
+// payload can't be marshalled (should be impossible for our own types).
+func mustEnvelope(t, sid string, data any) proto.Envelope {
+	env := proto.Envelope{Type: t, SessionID: sid}
+	if data != nil {
+		raw, err := json.Marshal(data)
+		if err != nil {
+			panic(err)
+		}
+		env.Data = raw
+	}
+	return env
 }

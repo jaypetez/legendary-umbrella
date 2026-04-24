@@ -13,12 +13,15 @@ async function loadDevices() {
         ? `<span class="dot online"></span>online`
         : `<span class="dot offline"></span>offline`;
       const last = d.last_seen_at ? new Date(d.last_seen_at * 1000).toLocaleString() : "—";
+      const shellHref = `/session?device=${encodeURIComponent(d.id)}&kind=shell`;
       return `<tr>
         <td>${escapeHtml(d.name)}</td>
         <td class="muted">${escapeHtml(d.platform || "—")}</td>
         <td>${status}</td>
         <td class="muted">${last}</td>
-        <td><button disabled title="Screen share arrives in M3">Connect</button></td>
+        <td>${d.online
+          ? `<a class="button" href="${shellHref}">Shell</a>`
+          : `<button disabled>Offline</button>`}</td>
       </tr>`;
     }).join("");
   } catch (err) {
