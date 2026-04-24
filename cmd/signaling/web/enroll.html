@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Enroll a device</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Enroll a device</h1>
+      <nav><a href="/">&larr; Back to devices</a></nav>
+    </header>
+    <main>
+      <section>
+        <p>Run <code>agent enroll</code> on the new device and enter the code shown there.</p>
+        <form id="enroll-form">
+          <label>
+            User code
+            <input name="user_code" autocomplete="off" placeholder="XXXX-XXXX" required />
+          </label>
+          <div id="lookup-result" class="muted"></div>
+          <label>
+            Name this device
+            <input name="name" autocomplete="off" placeholder="e.g. kitchen-pi" />
+          </label>
+          <button type="submit">Approve</button>
+          <div id="approve-result"></div>
+        </form>
+      </section>
+    </main>
+    <script src="/enroll.js"></script>
+  </body>
+</html>

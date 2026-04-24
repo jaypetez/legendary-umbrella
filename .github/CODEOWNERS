@@ -1,0 +1,7 @@
+# Code owners for this repository.
+# See: https://docs.github.com/articles/about-code-owners
+#
+# Branch protection requires review from a code owner before a PR can merge
+# into `main`. Add more GitHub usernames here to grow the approver pool.
+
+* @jaypetez
