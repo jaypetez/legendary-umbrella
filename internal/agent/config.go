@@ -12,16 +12,17 @@ import (
 // Config is the persisted state of an enrolled agent: the signaling endpoint
 // it talks to plus the bearer token the server issued at enrollment.
 type Config struct {
-	ServerURL   string `json:"server_url"`   // e.g. https://connect.example.com
+	ServerURL   string `json:"server_url"` // e.g. https://connect.example.com
 	DeviceID    string `json:"device_id"`
 	DeviceToken string `json:"device_token"` // secret — this file should be 0600
 	DeviceName  string `json:"device_name"`
 }
 
 // DefaultConfigPath picks a reasonable per-OS location:
-//   Linux/BSD: $XDG_CONFIG_HOME/connect-agent/config.json, or ~/.config/...
-//   macOS:     ~/Library/Application Support/connect-agent/config.json
-//   Windows:   %AppData%\connect-agent\config.json
+//
+//	Linux/BSD: $XDG_CONFIG_HOME/connect-agent/config.json, or ~/.config/...
+//	macOS:     ~/Library/Application Support/connect-agent/config.json
+//	Windows:   %AppData%\connect-agent\config.json
 func DefaultConfigPath() (string, error) {
 	if v := os.Getenv("CONNECT_AGENT_CONFIG"); v != "" {
 		return v, nil
