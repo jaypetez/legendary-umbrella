@@ -1,0 +1,16 @@
+/.claude/
+/bin/
+/dist/
+/data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+.env
+.env.local
+/.idea/
+/.vscode/
+*.exe
+*.exe~
+agent.json
+signaling.yaml
